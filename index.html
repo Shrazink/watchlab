@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WatchLab Web</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#f6f6f4;--fg:#1d1d1b;--card:#fff;--line:#d9d9d4;--accent:#0b6bcb;--muted:#6b6b66;color-scheme:light}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161615;--fg:#ecece8;--card:#222221;--line:#3a3a37;--accent:#5aa9ff;--muted:#9a9a94;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#161615;--fg:#ecece8;--card:#222221;--line:#3a3a37;--accent:#5aa9ff;--muted:#9a9a94;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,system-ui,"Segoe UI",sans-serif;padding:14px;max-width:720px;margin-inline:auto}
+h1{font-size:20px;margin:4px 0 2px}
+p.sub{margin:0 0 12px;color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0}
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 13px;font-size:14px;margin:2px 4px 2px 0}
+button.sec{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+input{width:100%;padding:9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font-size:14px;margin:4px 0}
+code,.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}
+.ch{border-top:1px solid var(--line);padding:8px 0}
+.props{color:var(--muted);font-size:12px}
+#log{height:240px;overflow:auto;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.warn{color:#b3261e}
+</style>
+</head>
+<body>
+<h1>WatchLab Web</h1>
+<p class="sub">Explorador Bluetooth para o seu smartwatch. Abra esta página no app Bluefy.</p>
+
+<div id="nosupport" class="card warn" hidden>
+Este navegador não tem Bluetooth Web. No iPhone, instale o app gratuito Bluefy e abra este link dentro dele.
+</div>
+
+<div class="card">
+<button id="scan">Procurar relógio</button>
+<button id="disc" class="sec" disabled>Desconectar</button>
+<div id="status" class="props">Desconectado</div>
+<label class="props">UUIDs de serviço extras (separe por vírgula)</label>
+<input id="extra" placeholder="ex: ff00, fff0, 6e400001-b5a3-f393-e0a9-e50e24dcca9d">
+<div class="props">Digite os UUIDs antes de procurar. O navegador só libera serviços que foram pedidos.</div>
+</div>
+
+<div id="services"></div>
+
+<div class="card">
+<b>Registro</b> <button class="sec" id="clear">Limpar</button> <button class="sec" id="copy">Copiar</button>
+<div id="log"></div>
+</div>
+
+<script>
+const DEFAULTS=["battery_service","device_information","generic_access",0xfee7,0xfee0,0xfff0,0xff00,0xffe0,0xfd00,
+"6e400001-b5a3-f393-e0a9-e50e24dcca9d","0000ae00-0000-1000-8000-00805f9b34fb","0000fff0-0000-1000-8000-00805f9b34fb"];
+let dev=null,server=null;
+const $=id=>document.getElementById(id);
+const logEl=$("log");
+function log(s){logEl.textContent=new Date().toLocaleTimeString()+"  "+s+"\n"+logEl.textContent}
+const hex=dv=>Array.from(new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength)).map(b=>b.toString(16).padStart(2,"0")).join(" ");
+const parseHex=s=>{const c=s.replace(/[^0-9a-f]/gi,"");const out=[];for(let i=0;i+1<c.length;i+=2)out.push(parseInt(c.substr(i,2),16));return new Uint8Array(out)};
+function normUuid(u){u=u.trim().toLowerCase();if(/^[0-9a-f]{4}$/.test(u))return parseInt(u,16);return u}
+
+if(!navigator.bluetooth){$("nosupport").hidden=false;$("scan").disabled=true}
+
+$("clear").onclick=()=>logEl.textContent="";
+$("copy").onclick=async()=>{try{await navigator.clipboard.writeText(logEl.textContent);log("Copiado")}catch(e){log("Não foi possível copiar")}};
+
+$("scan").onclick=async()=>{
+  try{
+    const extra=$("extra").value.split(",").filter(x=>x.trim()).map(normUuid);
+    dev=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[...DEFAULTS,...extra]});
+    dev.addEventListener("gattserverdisconnected",()=>{$("status").textContent="Desconectado";$("disc").disabled=true;log("Desconectou")});
+    $("status").textContent="Conectando a "+(dev.name||"(sem nome)")+"…";
+    server=await dev.gatt.connect();
+    $("status").textContent="Conectado: "+(dev.name||dev.id);$("disc").disabled=false;
+    log("Conectado a "+(dev.name||dev.id));
+    await listServices();
+  }catch(e){log("Erro: "+e.message);$("status").textContent="Erro: "+e.message}
+};
+$("disc").onclick=()=>{if(dev&&dev.gatt.connected)dev.gatt.disconnect()};
+
+async function listServices(){
+  const box=$("services");box.textContent="";
+  let svcs=[];
+  try{svcs=await server.getPrimaryServices()}catch(e){log("Nenhum serviço liberado: "+e.message);return}
+  log(svcs.length+" serviço(s) encontrado(s)");
+  for(const s of svcs){
+    const card=document.createElement("div");card.className="card";
+    const h=document.createElement("div");h.className="mono";h.textContent="Serviço "+s.uuid;card.appendChild(h);
+    let chars=[];
+    try{chars=await s.getCharacteristics()}catch(e){log("Erro em "+s.uuid+": "+e.message)}
+    for(const c of chars){
+      const row=document.createElement("div");row.className="ch";
+      const t=document.createElement("div");t.className="mono";t.textContent=c.uuid;row.appendChild(t);
+      const p=c.properties;const names=Object.keys(Object.getPrototypeOf(p)).concat(Object.keys(p)).filter(k=>p[k]===true);
+      const pr=document.createElement("div");pr.className="props";pr.textContent=names.join(", ");row.appendChild(pr);
+      if(p.read){const b=document.createElement("button");b.className="sec";b.textContent="Ler";
+        b.onclick=async()=>{try{log("LER "+c.uuid+": "+hex(await c.readValue()))}catch(e){log("Erro ler: "+e.message)}};row.appendChild(b)}
+      if(p.notify||p.indicate){const b=document.createElement("button");b.className="sec";b.textContent="Ouvir";
+        b.onclick=async()=>{try{c.addEventListener("characteristicvaluechanged",ev=>log("RX "+c.uuid+": "+hex(ev.target.value)));
+          await c.startNotifications();log("Ouvindo "+c.uuid)}catch(e){log("Erro ouvir: "+e.message)}};row.appendChild(b)}
+      if(p.write||p.writeWithoutResponse){
+        const inp=document.createElement("input");inp.placeholder="bytes em hex, ex: df 00 05 00 02 01";row.appendChild(inp);
+        const b=document.createElement("button");b.textContent="Enviar";
+        b.onclick=async()=>{const d=parseHex(inp.value);if(!d.length){log("Digite bytes em hex");return}
+          try{if(p.writeWithoutResponse&&!p.write)await c.writeValueWithoutResponse(d);else await c.writeValueWithResponse(d);
+            log("TX "+c.uuid+": "+hex(new DataView(d.buffer)))}catch(e){log("Erro enviar: "+e.message)}};row.appendChild(b)}
+      card.appendChild(row);
+    }
+    box.appendChild(card);
+  }
+}
+</script>
+</body>
+</html>
